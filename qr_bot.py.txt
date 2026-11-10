@@ -1,0 +1,196 @@
+import io
+import os
+import telebot
+from telebot import types
+import qrcode
+from qrcode.constants import ERROR_CORRECT_M
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise SystemExit("❌ Не задан BOT_TOKEN. Установи переменную окружения.")
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+DEFAULT_SIZE = 10
+DEFAULT_COLOR = "black"
+
+COLORS = {
+    "⚫ Чёрный": "black",
+    "🔴 Красный": "red",
+    "🔵 Синий": "blue",
+    "🟢 Зелёный": "green",
+    "🟣 Фиолетовый": "purple",
+    "🟠 Оранжевый": "orange",
+}
+
+settings: dict[int, dict] = {}
+
+
+def get_settings(chat_id: int) -> dict:
+    if chat_id not in settings:
+        settings[chat_id] = {"size": DEFAULT_SIZE, "color": DEFAULT_COLOR}
+    return settings[chat_id]
+
+
+def make_qr(data: str, size: int = DEFAULT_SIZE, color: str = "black") -> io.BytesIO:
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=ERROR_CORRECT_M,
+        box_size=size,
+        border=4,
+    )
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color=color, back_color="white").convert("RGB")
+
+    buf = io.BytesIO()
+    buf.name = "qr.png"
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+def main_keyboard() -> types.ReplyKeyboardMarkup:
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton("🎨 Цвет"))
+    kb.add(types.KeyboardButton("📏 Размер"))
+    kb.add(types.KeyboardButton("❓ Помощь"))
+    return kb
+
+
+def colors_keyboard() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        types.InlineKeyboardButton(name, callback_data=f"color:{value}")
+        for name, value in COLORS.items()
+    ]
+    kb.add(*buttons)
+    return kb
+
+
+def sizes_keyboard() -> types.InlineKeyboardMarkup:
+    kb = types.InlineKeyboardMarkup(row_width=5)
+    buttons = [
+        types.InlineKeyboardButton(str(s), callback_data=f"size:{s}")
+        for s in (4, 6, 8, 10, 12, 14, 16)
+    ]
+    kb.add(*buttons)
+    return kb
+
+
+@bot.message_handler(commands=["start"])
+def cmd_start(message: types.Message) -> None:
+    bot.send_message(
+        message.chat.id,
+        "👋 Привет! Я генерирую QR-коды.\n\n"
+        "Просто отправь мне текст или ссылку — и получишь QR-код картинкой.\n\n"
+        "⚙️ Можно настроить цвет и размер кнопками ниже.",
+        reply_markup=main_keyboard(),
+    )
+
+
+@bot.message_handler(commands=["help"])
+@bot.message_handler(func=lambda m: m.text == "❓ Помощь")
+def cmd_help(message: types.Message) -> None:
+    bot.send_message(
+        message.chat.id,
+        "📖 <b>Как пользоваться</b>\n\n"
+        "1. Отправь любой текст или ссылку — получишь QR.\n"
+        "2. Кнопка «🎨 Цвет» — выбрать цвет модулей.\n"
+        "3. Кнопка «📏 Размер» — выбрать размер QR.\n"
+        "4. В группе можно упомянуть меня: <code>@бот ссылка</code>",
+        parse_mode="HTML",
+        reply_markup=main_keyboard(),
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "🎨 Цвет")
+def ask_color(message: types.Message) -> None:
+    cur = get_settings(message.chat.id)["color"]
+    bot.send_message(
+        message.chat.id,
+        f"Выбери цвет модулей (сейчас: <b>{cur}</b>):",
+        parse_mode="HTML",
+        reply_markup=colors_keyboard(),
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "📏 Размер")
+def ask_size(message: types.Message) -> None:
+    cur = get_settings(message.chat.id)["size"]
+    bot.send_message(
+        message.chat.id,
+        f"Выбери размер (box_size, сейчас: <b>{cur}</b>):",
+        parse_mode="HTML",
+        reply_markup=sizes_keyboard(),
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("color:"))
+def cb_color(call: types.CallbackQuery) -> None:
+    color = call.data.split(":", 1)[1]
+    get_settings(call.message.chat.id)["color"] = color
+    bot.answer_callback_query(call.id, f"Цвет: {color}")
+    bot.edit_message_text(
+        f"✅ Цвет установлен: <b>{color}</b>",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="HTML",
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("size:"))
+def cb_size(call: types.CallbackQuery) -> None:
+    size = int(call.data.split(":", 1)[1])
+    get_settings(call.message.chat.id)["size"] = size
+    bot.answer_callback_query(call.id, f"Размер: {size}")
+    bot.edit_message_text(
+        f"✅ Размер установлен: <b>{size}</b>",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="HTML",
+    )
+
+
+@bot.message_handler(content_types=["text"])
+def handle_text(message: types.Message) -> None:
+    text = message.text.strip()
+
+    if message.chat.type in ("group", "supergroup"):
+        bot_username = bot.get_me().username
+        if f"@{bot_username}" not in text:
+            return
+        text = text.replace(f"@{bot_username}", "").strip()
+
+    if not text:
+        bot.send_message(message.chat.id, "Отправь текст или ссылку для QR-кода.")
+        return
+
+    if len(text) > 2000:
+        bot.send_message(
+            message.chat.id,
+            "❌ Слишком длинный текст для QR (макс. ~2000 символов).",
+        )
+        return
+
+    cfg = get_settings(message.chat.id)
+
+    try:
+        buf = make_qr(text, size=cfg["size"], color=cfg["color"])
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ Не получилось: {e}")
+        return
+
+    preview = text if len(text) <= 60 else text[:57] + "..."
+    bot.send_photo(
+        message.chat.id,
+        buf,
+        caption=f"✅ QR для: <code>{preview}</code>",
+        parse_mode="HTML",
+    )
+
+
+if __name__ == "__main__":
+    print("QR-бот запущен. Ctrl+C для остановки.")
+    bot.infinity_polling()
